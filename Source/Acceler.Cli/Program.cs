@@ -1,12 +1,16 @@
 ﻿using System;
+using CommandLine;
 
 namespace Acceler.Cli
 {
     class Program
     {
-        static void Main(string[] args)
+        static int Main(string[] args)
         {
-            Console.WriteLine("Hello World!");
+            return CommandLine.Parser.Default.ParseArguments<SniOptions>(args)
+                .MapResult(
+                    (SniOptions options) => options.RunAndReturnExitCode(),
+                    errors => 1);
         }
     }
 }
