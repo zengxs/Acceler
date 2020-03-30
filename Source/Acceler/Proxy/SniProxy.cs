@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 
@@ -11,6 +12,15 @@ namespace Acceler.Proxy
     public class SniProxy : IProxy
     {
         public int Port { get; private set; }
+
+        private string _proxyHost = null;
+        private int? _proxyPort = null;
+
+        public SniProxy(string proxyHost = null, int? proxyPort = null)
+        {
+            _proxyHost = proxyHost;
+            _proxyPort = proxyPort;
+        }
 
         public async Task StartAsync(int port = 8443)
         {
@@ -22,7 +32,14 @@ namespace Acceler.Proxy
             while (true)
             {
                 var client = await server.AcceptTcpClientAsync();
-                HandleConnection(client);
+                try
+                {
+                    HandleConnection(client);
+                }
+                catch (IOException e)
+                {
+                    Console.WriteLine(e.ToString());
+                }
             }
         }
 
@@ -67,17 +84,61 @@ namespace Acceler.Proxy
 
             var host = await ParseSniHost(new MemoryStream(buffer));
 
-            var remote = new TcpClient();
-            var remoteIp = Dns.GetHostAddresses(host)[0];
-            await remote.ConnectAsync(remoteIp, 443);
-
-            var rs = remote.GetStream();
-            await rs.WriteAsync(buffer, 0, buffer.Length);
-            rs.CopyToAsync(stream);
-            await stream.CopyToAsync(rs);
+            await DialToRemote(stream, host, buffer);
 
             stream.Close();
             client.Close();
+        }
+
+        private async Task DialToRemote(NetworkStream clientStream, string remoteHost, byte[] clientHello)
+        {
+            var remote = new TcpClient();
+            NetworkStream remoteStream;
+            if (_proxyHost == null || _proxyPort == null)
+            {
+                var remoteIpAddresses = await Dns.GetHostAddressesAsync(remoteHost); // 直接连接
+                await remote.ConnectAsync(remoteIpAddresses[0], 443);
+                remoteStream = remote.GetStream();
+            }
+            else
+            {
+                // 使用 HTTP 代理
+                var httpProxyIpAddresses = await Dns.GetHostAddressesAsync(_proxyHost);
+                await remote.ConnectAsync(httpProxyIpAddresses[0], _proxyPort.Value);
+                remoteStream = remote.GetStream();
+
+                var sb = new StringBuilder();
+                sb.Append($"CONNECT {remoteHost}:443 HTTP/1.0\r\n");
+                sb.AppendFormat("User-Agent: Acceler/{0}\r\n", Assembly.GetExecutingAssembly().GetName().Version);
+                sb.Append("\r\n");
+
+                var buf = Encoding.ASCII.GetBytes(sb.ToString());
+                await remoteStream.WriteAsync(buf, 0, buf.Length);
+                var receive = await ReceiveUntil(remoteStream, Encoding.ASCII.GetBytes("\r\n\r\n"));
+                Console.WriteLine(Encoding.Default.GetString(receive));
+            }
+
+            await remoteStream.WriteAsync(clientHello, 0, clientHello.Length);
+            remoteStream.CopyToAsync(clientStream);
+            await clientStream.CopyToAsync(remoteStream);
+
+            remoteStream.Close();
+            remote.Close();
+        }
+
+        private async Task<byte[]> ReceiveUntil(Stream stream, byte[] terminal)
+        {
+            var buffer = new byte[terminal.Length];
+
+            await stream.ReadAsync(buffer, 0, buffer.Length);
+            while (!buffer.Reverse().Take(terminal.Length).Reverse().SequenceEqual(terminal))
+            {
+                var offset = buffer.Length;
+                Array.Resize(ref buffer, buffer.Length + 1);
+                await stream.ReadAsync(buffer, offset, 1);
+            }
+
+            return buffer;
         }
 
         private async Task<string> ParseSniHost(MemoryStream clientHello)

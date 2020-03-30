@@ -12,7 +12,7 @@ namespace Acceler.Cli
 
         public int RunAndReturnExitCode()
         {
-            var server = new SniProxy();
+            var server = new SniProxy("127.0.0.1", 8080);
             server.StartAsync().GetAwaiter().GetResult();
             return 0;
         }
